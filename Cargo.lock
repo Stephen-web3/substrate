@@ -4372,6 +4372,7 @@ dependencies = [
  "paste 1.0.0",
  "pretty_assertions",
  "pwasm-utils",
+ "rand 0.7.3",
  "serde",
  "sp-core",
  "sp-io",

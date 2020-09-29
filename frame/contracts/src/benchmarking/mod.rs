@@ -20,14 +20,16 @@
 #![cfg(feature = "runtime-benchmarks")]
 
 mod code;
+mod sandbox;
 
 use crate::*;
 use crate::Module as Contracts;
 use crate::exec::StorageKey;
-use crate::schedule::API_BENCHMARK_BATCH_SIZE;
+use crate::schedule::{API_BENCHMARK_BATCH_SIZE, INSTR_BENCHMARK_BATCH_SIZE};
 use self::code::{
 	body, ModuleDefinition, DataSegment, ImportedMemory, ImportedFunction, WasmModule,
 };
+use self::sandbox::Sandbox;
 
 use frame_benchmarking::{benchmarks, account, whitelisted_caller};
 use frame_system::{Module as System, RawOrigin};
@@ -37,6 +39,9 @@ use sp_std::{default::Default, convert::{TryInto}};
 
 /// How many batches we do per API benchmark.
 const API_BENCHMARK_BATCHES: u32 = 20;
+
+/// How many batches we do per Instruction benchmark.
+const INSTR_BENCHMARK_BATCHES: u32 = 1;
 
 /// An instantiated and deployed contract.
 struct Contract<T: Trait> {
@@ -273,7 +278,7 @@ benchmarks! {
 		let endowment = Config::<T>::subsistence_threshold_uncached();
 		let caller = whitelisted_caller();
 		T::Currency::make_free_balance_be(&caller, caller_funding::<T>());
-		let WasmModule { code, hash } = WasmModule::<T>::dummy();
+		let WasmModule { code, hash, .. } = WasmModule::<T>::dummy();
 		let origin = RawOrigin::Signed(caller.clone());
 		let addr = T::DetermineContractAddress::contract_address_for(&hash, &data, &caller);
 		Contracts::<T>::put_code_raw(code)?;
@@ -841,7 +846,7 @@ benchmarks! {
 			.peekable();
 		let topics_len = topics.peek().map(|i| i.len()).unwrap_or(0);
 		let topics = topics.flatten().collect();
-		use body::CountedInstruction::{Counter, Regular};
+		use body::DynInstr::{Counter, Regular};
 		let code = WasmModule::<T>::from(ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
 			imported_functions: vec![ImportedFunction {
@@ -855,7 +860,7 @@ benchmarks! {
 					value: topics,
 				},
 			],
-			call_body: Some(body::counted(API_BENCHMARK_BATCH_SIZE, vec![
+			call_body: Some(body::repeated_dyn(API_BENCHMARK_BATCH_SIZE, vec![
 				Counter(0, topics_len as u32), // topics_ptr
 				Regular(Instruction::I32Const(topics_len as i32)), // topics_len
 				Regular(Instruction::I32Const(0)), // data_ptr
@@ -906,7 +911,7 @@ benchmarks! {
 			.flat_map(|n| T::Hashing::hash_of(&n).as_ref().to_vec())
 			.collect::<Vec<_>>();
 		let key_len = sp_std::mem::size_of::<<T::Hashing as sp_runtime::traits::Hash>::Output>();
-		use body::CountedInstruction::{Counter, Regular};
+		use body::DynInstr::{Counter, Regular};
 		let code = WasmModule::<T>::from(ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
 			imported_functions: vec![ImportedFunction {
@@ -920,7 +925,7 @@ benchmarks! {
 					value: keys,
 				},
 			],
-			call_body: Some(body::counted(r * API_BENCHMARK_BATCH_SIZE, vec![
+			call_body: Some(body::repeated_dyn(r * API_BENCHMARK_BATCH_SIZE, vec![
 				Counter(0, key_len as u32), // key_ptr
 				Regular(Instruction::I32Const(0)), // value_ptr
 				Regular(Instruction::I32Const(0)), // value_len
@@ -971,7 +976,7 @@ benchmarks! {
 			.collect::<Vec<_>>();
 		let key_bytes = keys.iter().flatten().cloned().collect::<Vec<_>>();
 		let key_len = sp_std::mem::size_of::<<T::Hashing as sp_runtime::traits::Hash>::Output>();
-		use body::CountedInstruction::{Counter, Regular};
+		use body::DynInstr::{Counter, Regular};
 		let code = WasmModule::<T>::from(ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
 			imported_functions: vec![ImportedFunction {
@@ -985,7 +990,7 @@ benchmarks! {
 					value: key_bytes,
 				},
 			],
-			call_body: Some(body::counted(r * API_BENCHMARK_BATCH_SIZE, vec![
+			call_body: Some(body::repeated_dyn(r * API_BENCHMARK_BATCH_SIZE, vec![
 				Counter(0, key_len as u32),
 				Regular(Instruction::Call(0)),
 			])),
@@ -1014,7 +1019,7 @@ benchmarks! {
 		let key_len = sp_std::mem::size_of::<<T::Hashing as sp_runtime::traits::Hash>::Output>();
 		let key_bytes = keys.iter().flatten().cloned().collect::<Vec<_>>();
 		let key_bytes_len = key_bytes.len();
-		use body::CountedInstruction::{Counter, Regular};
+		use body::DynInstr::{Counter, Regular};
 		let code = WasmModule::<T>::from(ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
 			imported_functions: vec![ImportedFunction {
@@ -1028,7 +1033,7 @@ benchmarks! {
 					value: key_bytes,
 				},
 			],
-			call_body: Some(body::counted(r * API_BENCHMARK_BATCH_SIZE, vec![
+			call_body: Some(body::repeated_dyn(r * API_BENCHMARK_BATCH_SIZE, vec![
 				Counter(0, key_len as u32), // key_ptr
 				Regular(Instruction::I32Const((key_bytes_len + 4) as i32)), // out_ptr
 				Regular(Instruction::I32Const(key_bytes_len as i32)), // out_len_ptr
@@ -1106,7 +1111,7 @@ benchmarks! {
 		assert!(value > 0.into());
 		let value_bytes = value.encode();
 		let value_len = value_bytes.len();
-		use body::CountedInstruction::{Counter, Regular};
+		use body::DynInstr::{Counter, Regular};
 		let code = WasmModule::<T>::from(ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
 			imported_functions: vec![ImportedFunction {
@@ -1124,7 +1129,7 @@ benchmarks! {
 					value: account_bytes,
 				},
 			],
-			call_body: Some(body::counted(r * API_BENCHMARK_BATCH_SIZE, vec![
+			call_body: Some(body::repeated_dyn(r * API_BENCHMARK_BATCH_SIZE, vec![
 				Counter(value_len as u32, account_len as u32), // account_ptr
 				Regular(Instruction::I32Const(account_len as i32)), // account_len
 				Regular(Instruction::I32Const(0)), // value_ptr
@@ -1158,7 +1163,7 @@ benchmarks! {
 		let value: BalanceOf<T> = 0.into();
 		let value_bytes = value.encode();
 		let value_len = value_bytes.len();
-		use body::CountedInstruction::{Counter, Regular};
+		use body::DynInstr::{Counter, Regular};
 		let code = WasmModule::<T>::from(ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
 			imported_functions: vec![ImportedFunction {
@@ -1186,7 +1191,7 @@ benchmarks! {
 					value: callee_bytes,
 				},
 			],
-			call_body: Some(body::counted(r * API_BENCHMARK_BATCH_SIZE, vec![
+			call_body: Some(body::repeated_dyn(r * API_BENCHMARK_BATCH_SIZE, vec![
 				Counter(value_len as u32, callee_len as u32), // callee_ptr
 				Regular(Instruction::I32Const(callee_len as i32)), // callee_len
 				Regular(Instruction::I64Const(0)), // gas
@@ -1238,7 +1243,7 @@ benchmarks! {
 		let value: BalanceOf<T> = t.into();
 		let value_bytes = value.encode();
 		let value_len = value_bytes.len();
-		use body::CountedInstruction::{Counter, Regular};
+		use body::DynInstr::{Counter, Regular};
 		let code = WasmModule::<T>::from(ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
 			imported_functions: vec![ImportedFunction {
@@ -1270,7 +1275,7 @@ benchmarks! {
 					value: (o * 1024).to_le_bytes().into(),
 				},
 			],
-			call_body: Some(body::counted(API_BENCHMARK_BATCH_SIZE, vec![
+			call_body: Some(body::repeated_dyn(API_BENCHMARK_BATCH_SIZE, vec![
 				Counter(value_len as u32, callee_len as u32), // callee_ptr
 				Regular(Instruction::I32Const(callee_len as i32)), // callee_len
 				Regular(Instruction::I64Const(0)), // gas
@@ -1321,7 +1326,7 @@ benchmarks! {
 		let addr_len_offset = hashes_offset + hashes_len;
 		let addr_offset = addr_len_offset + addr_len;
 
-		use body::CountedInstruction::{Counter, Regular};
+		use body::DynInstr::{Counter, Regular};
 		let code = WasmModule::<T>::from(ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
 			imported_functions: vec![ImportedFunction {
@@ -1355,7 +1360,7 @@ benchmarks! {
 					value: addr_len.to_le_bytes().into(),
 				},
 			],
-			call_body: Some(body::counted(r * API_BENCHMARK_BATCH_SIZE, vec![
+			call_body: Some(body::repeated_dyn(r * API_BENCHMARK_BATCH_SIZE, vec![
 				Counter(hashes_offset as u32, hash_len as u32), // code_hash_ptr
 				Regular(Instruction::I32Const(hash_len as i32)), // code_hash_len
 				Regular(Instruction::I64Const(0)), // gas
@@ -1439,7 +1444,7 @@ benchmarks! {
 		let output_len_offset = addr_len_offset + 4;
 		let output_offset = output_len_offset + 4;
 
-		use body::CountedInstruction::{Counter, Regular};
+		use body::DynInstr::{Counter, Regular};
 		let code = WasmModule::<T>::from(ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
 			imported_functions: vec![ImportedFunction {
@@ -1481,7 +1486,7 @@ benchmarks! {
 					value: (o * 1024).to_le_bytes().into(),
 				},
 			],
-			call_body: Some(body::counted(API_BENCHMARK_BATCH_SIZE, vec![
+			call_body: Some(body::repeated_dyn(API_BENCHMARK_BATCH_SIZE, vec![
 				Regular(Instruction::I32Const(hash_offset as i32)), // code_hash_ptr
 				Regular(Instruction::I32Const(hash_len as i32)), // code_hash_len
 				Regular(Instruction::I64Const(0)), // gas
@@ -1578,6 +1583,232 @@ benchmarks! {
 		), vec![], Endow::Max)?;
 		let origin = RawOrigin::Signed(instance.caller.clone());
 	}: call(origin, instance.addr, 0.into(), Weight::max_value(), vec![])
+
+	// We make the assumption that pushing a constant and dropping a value takes roughly
+	// the same amount of time. We follow that `t.load` and `drop` both have the weight
+	// of this benchmark / 2. We need to make this assumption because there is no way
+	// to measure them on their own using a valid wasm module. We need their individual
+	// values to derive the weight of individual instructions (by substraction) from
+	// benchmarks that include those for parameter pushing and return type dropping.
+	// We call the weight of `t.load` and `drop`: `w_param`.
+	// The weight that would result from the respective benchmark we call: `w_bench`.
+	//
+	// w_i{32,64}const = w_drop = w_bench / 2
+	instr_i64const {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::Drop),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_i{32,64}load = w_bench - 2 * w_param
+	instr_i64load {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomUnaligned, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			memory: Some(ImportedMemory::max::<T>()),
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				RandomUnaligned(0, code::max_pages::<T>() * 64 * 1024 - 8),
+				Regular(Instruction::I64Load(3, 0)),
+				Regular(Instruction::Drop),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_i{32,64}store{...} = w_bench - 2 * w_param
+	instr_i64store {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, RandomUnaligned, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			memory: Some(ImportedMemory::max::<T>()),
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				RandomUnaligned(0, code::max_pages::<T>() * 64 * 1024 - 8),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::I64Store(3, 0)),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_select = w_bench - 4 * w_param
+	instr_select {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, RandomI32, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				RandomI64(i64::min_value(), i64::max_value()),
+				RandomI64(i64::min_value(), i64::max_value()),
+				RandomI32(0, 2),
+				Regular(Instruction::Select),
+				Regular(Instruction::Drop),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_if = w_bench - 3 * w_param
+	instr_if {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, RandomI32, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				RandomI32(0, 2),
+				Regular(Instruction::If(BlockType::Value(ValueType::I64))),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::Else),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::End),
+				Regular(Instruction::Drop),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_br = w_bench - 2 * w_param
+	instr_br {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				Regular(Instruction::Block(BlockType::NoResult)),
+				Regular(Instruction::Block(BlockType::NoResult)),
+				Regular(Instruction::Block(BlockType::NoResult)),
+				Regular(Instruction::Br(1)),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::Drop),
+				Regular(Instruction::End),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::Drop),
+				Regular(Instruction::End),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::Drop),
+				Regular(Instruction::End),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_br_if = w_bench - 4 * w_param
+	// The two additional pushed are only executed 50% of the time.
+	// Making it: 2 * w_param * (50% * 4 * w_param)
+	instr_br_if {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, RandomI32, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				Regular(Instruction::Block(BlockType::NoResult)),
+				Regular(Instruction::Block(BlockType::NoResult)),
+				Regular(Instruction::Block(BlockType::NoResult)),
+				RandomI32(0, 2),
+				Regular(Instruction::BrIf(1)),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::Drop),
+				Regular(Instruction::End),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::Drop),
+				Regular(Instruction::End),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::Drop),
+				Regular(Instruction::End),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_call = w_bench - 2 * w_param
+	// Note
+	// This is a very slow instruction. We therefore use the API benchmark batch
+	// parameters that use a lower repetition count. Otherwise this benchmark would
+	// be too time consuming.
+	instr_call {
+		let r in 0 .. API_BENCHMARK_BATCHES;
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			// We need to make use of the stack here in order to trigger stack height
+			// instrumentation.
+			aux_body: Some(body::plain(vec![
+				Instruction::I64Const(42),
+				Instruction::Drop,
+				Instruction::End,
+			])),
+			call_body: Some(body::repeated(r * API_BENCHMARK_BATCH_SIZE, &[
+				Instruction::Call(2), // call aux
+			])),
+			inject_stack_metering: true,
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_i{32,64}add = w_bench - 3 * w_param
+	instr_i64add {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				RandomI64(i64::min_value(), i64::max_value()),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::I64Add),
+				Regular(Instruction::Drop),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_i{32,64}div{U,S} = w_bench - 3 * w_param
+	instr_i64divu {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				RandomI64(i64::min_value(), i64::max_value()),
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::I64DivU),
+				Regular(Instruction::Drop),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_i{32,64}clz = w_bench - 2 * w_param
+	instr_i64clz {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, Regular};
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+				RandomI64(i64::min_value(), i64::max_value()),
+				Regular(Instruction::I64Clz),
+				Regular(Instruction::Drop),
+			])),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
 }
 
 #[cfg(test)]

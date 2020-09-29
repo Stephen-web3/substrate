@@ -28,28 +28,25 @@ use crate::Trait;
 use crate::Module as Contracts;
 
 use parity_wasm::elements::{Instruction, Instructions, FuncBody, ValueType, BlockType};
+use pwasm_utils::stack_height::inject_limiter;
 use sp_runtime::traits::Hash;
+use sp_sandbox::{EnvironmentDefinitionBuilder, Memory};
 use sp_std::{prelude::*, convert::TryFrom};
 
 /// Pass to `create_code` in order to create a compiled `WasmModule`.
+#[derive(Default)]
 pub struct ModuleDefinition {
 	pub data_segments: Vec<DataSegment>,
 	pub memory: Option<ImportedMemory>,
 	pub imported_functions: Vec<ImportedFunction>,
 	pub deploy_body: Option<FuncBody>,
 	pub call_body: Option<FuncBody>,
-}
-
-impl Default for ModuleDefinition {
-	fn default() -> Self {
-		Self {
-			data_segments: vec![],
-			memory: None,
-			imported_functions: vec![],
-			deploy_body: None,
-			call_body: None,
-		}
-	}
+	pub aux_body: Option<FuncBody>,
+	/// If seto to true the stack height limiter is injected into the the module. This is
+	/// needed for instruction debugging because the cost of executing the stack height
+	/// instrumentation should be included in the costs for the individual instructions that cause
+	/// more metering code (mainly call).
+	pub inject_stack_metering: bool,
 }
 
 pub struct DataSegment {
@@ -57,6 +54,7 @@ pub struct DataSegment {
 	pub value: Vec<u8>,
 }
 
+#[derive(Clone)]
 pub struct ImportedMemory {
 	pub min_pages: u32,
 	pub max_pages: u32,
@@ -80,6 +78,7 @@ pub struct ImportedFunction {
 pub struct WasmModule<T:Trait> {
 	pub code: Vec<u8>,
 	pub hash: <T::Hashing as Hash>::Output,
+	memory: Option<ImportedMemory>,
 }
 
 impl<T: Trait> From<ModuleDefinition> for WasmModule<T> {
@@ -106,8 +105,17 @@ impl<T: Trait> From<ModuleDefinition> for WasmModule<T> {
 			.export().field("deploy").internal().func(func_offset).build()
 			.export().field("call").internal().func(func_offset + 1).build();
 
+		// If specified we add an additional internal function
+		if let Some(body) = def.aux_body {
+			contract = contract
+				.function()
+				.signature().with_params(vec![]).with_return_type(None).build()
+				.with_body(body)
+				.build();
+		}
+
 		// Grant access to linear memory.
-		if let Some(memory) = def.memory {
+		if let Some(memory) = &def.memory {
 			contract = contract.import()
 				.module("env").field("memory")
 				.external().memory(memory.min_pages, Some(memory.max_pages))
@@ -136,20 +144,33 @@ impl<T: Trait> From<ModuleDefinition> for WasmModule<T> {
 				.build()
 		}
 
-		let code = contract.build().to_bytes().unwrap();
+		let mut code = contract.build();
+		if def.inject_stack_metering {
+			code = inject_limiter(
+				code,
+				Contracts::<T>::current_schedule().limits.stack_height
+			)
+			.unwrap();
+		}
+		let code = code.to_bytes().unwrap();
 		let hash = T::Hashing::hash(&code);
 		Self {
 			code,
-			hash
+			hash,
+			memory: def.memory,
 		}
 	}
 }
 
 impl<T: Trait> WasmModule<T> {
+	/// Creates a wasm module with an empty `call` and `deploy` function and nothing else.
 	pub fn dummy() -> Self {
 		ModuleDefinition::default().into()
 	}
 
+	/// Creates a wasm module of `target_bytes` size. Used to benchmark the performance of
+	/// `put_code` for different sizes of wasm modules. The generated module maximizes
+	/// instrumentation runtime by nesting blocks as deeply as possible given the byte budget.
 	pub fn sized(target_bytes: u32) -> Self {
 		use parity_wasm::elements::Instruction::{If, I32Const, Return, End};
 		// Base size of a contract is 47 bytes and each expansion adds 6 bytes.
@@ -171,6 +192,9 @@ impl<T: Trait> WasmModule<T> {
 		.into()
 	}
 
+	/// Creates a wasm module that calls the imported function named `getter_name` `repeat`
+	/// times. The imported function is expected to have the "getter signature" of
+	/// (out_ptr: u32, len_ptr: u32) -> ().
 	pub fn getter(getter_name: &'static str, repeat: u32) -> Self {
 		let pages = max_pages::<T>();
 		ModuleDefinition {
@@ -198,6 +222,9 @@ impl<T: Trait> WasmModule<T> {
 		.into()
 	}
 
+	/// Creates a wasm module that calls the imported hash function named `name` `repeat` times
+	/// with an input of size `data_size`. Hash functions have the signature
+	/// (input_ptr: u32, input_len: u32, output_ptr: u32) -> ()
 	pub fn hasher(name: &'static str, repeat: u32, data_size: u32) -> Self {
 		ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
@@ -216,16 +243,44 @@ impl<T: Trait> WasmModule<T> {
 		}
 		.into()
 	}
+
+	/// Creates a memory instance for use in a sandbox with dimensions declared in this module
+	/// and adds it to `env`. A reference to that memory is returned so that it can be used to
+	/// access the memory contents from the supervisor.
+	pub fn add_memory<S>(&self, env: &mut EnvironmentDefinitionBuilder<S>) -> Option<Memory> {
+		let memory = if let Some(memory) = &self.memory {
+			memory
+		} else {
+			return None;
+		};
+		let memory = Memory::new(memory.min_pages, Some(memory.max_pages)).unwrap();
+		env.add_memory("env", "memory", memory.clone());
+		Some(memory)
+	}
 }
 
-/// Mechanisms to create a function body that can be used inside a `ModuleDefinition`.
+/// Mechanisms to generate a function body that can be used inside a `ModuleDefinition`.
 pub mod body {
 	use super::*;
 
-	pub enum CountedInstruction {
-		// (offset, increment_by)
-		Counter(u32, u32),
+	/// When generating contract code by repeating a wasm sequence, it sometimes necessary
+	/// to change those instructions on each repetition. The variants of this enum describe
+	/// various ways in which this can happen.
+	pub enum DynInstr {
+		/// Insert the associated instruction.
 		Regular(Instruction),
+		/// Insert a I32Const with incrementing value for each insertion.
+		/// (start_at, increment_by)
+		Counter(u32, u32),
+		/// Insert a I32Const with a random value in [low, high) not devisable by two.
+		/// (low, high)
+		RandomUnaligned(u32, u32),
+		/// Insert a I32Const with a random value in [low, high).
+		/// (low, high)
+		RandomI32(i32, i32),
+		/// Insert a I64Const with a random value in [low, high).
+		/// (low, high)
+		RandomI64(i64, i64),
 	}
 
 	pub fn plain(instructions: Vec<Instruction>) -> FuncBody {
@@ -245,19 +300,34 @@ pub mod body {
 		FuncBody::new(Vec::new(), instructions)
 	}
 
-	pub fn counted(repetitions: u32, mut instructions: Vec<CountedInstruction>) -> FuncBody {
+	pub fn repeated_dyn(repetitions: u32, mut instructions: Vec<DynInstr>) -> FuncBody {
+		use rand::prelude::*;
+
+		// We do not need to be secure here.
+		let mut rng = SmallRng::seed_from_u64(8446744073709551615);
+
 		// We need to iterate over indices because we cannot cycle over mutable references
 		let body = (0..instructions.len())
 			.cycle()
 			.take(instructions.len() * usize::try_from(repetitions).unwrap())
 			.map(|idx| {
 				match &mut instructions[idx] {
-					CountedInstruction::Counter(offset, increment_by) => {
+					DynInstr::Regular(instruction) => instruction.clone(),
+					DynInstr::Counter(offset, increment_by) => {
 						let current = *offset;
 						*offset += *increment_by;
 						Instruction::I32Const(current as i32)
 					},
-					CountedInstruction::Regular(instruction) => instruction.clone(),
+					DynInstr::RandomUnaligned(low, high) => {
+						let unaligned = rng.gen_range(*low, *high) | 1;
+						Instruction::I32Const(unaligned as i32)
+					},
+					DynInstr::RandomI32(low, high) => {
+						Instruction::I32Const(rng.gen_range(*low, *high))
+					},
+					DynInstr::RandomI64(low, high) => {
+						Instruction::I64Const(rng.gen_range(*low, *high))
+					},
 				}
 			})
 			.chain(sp_std::iter::once(Instruction::End))
