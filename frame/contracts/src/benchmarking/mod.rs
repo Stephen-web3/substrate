@@ -1760,6 +1760,61 @@ benchmarks! {
 		sbox.invoke();
 	}
 
+	// w_local_get = w_bench - 1 * w_param
+	instr_local_get {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{GetLocal, Regular};
+		let max_locals = Contracts::<T>::current_schedule().limits.stack_height;
+		let mut call_body = body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+			GetLocal(0, max_locals),
+			Regular(Instruction::Drop),
+		]);
+		body::inject_locals(&mut call_body, max_locals);
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(call_body),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_local_get = w_bench - 1 * w_param
+	instr_local_set {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, SetLocal};
+		let max_locals = Contracts::<T>::current_schedule().limits.stack_height;
+		let mut call_body = body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+			RandomI64(i64::min_value(), i64::max_value()),
+			SetLocal(0, max_locals),
+		]);
+		body::inject_locals(&mut call_body, max_locals);
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(call_body),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
+	// w_local_get = w_bench - 2 * w_param
+	instr_local_tee {
+		let r in 0 .. INSTR_BENCHMARK_BATCHES;
+		use body::DynInstr::{RandomI64, TeeLocal, Regular};
+		let max_locals = Contracts::<T>::current_schedule().limits.stack_height;
+		let mut call_body = body::repeated_dyn(r * INSTR_BENCHMARK_BATCH_SIZE, vec![
+			RandomI64(i64::min_value(), i64::max_value()),
+			TeeLocal(0, max_locals),
+			Regular(Instruction::Drop),
+		]);
+		body::inject_locals(&mut call_body, max_locals);
+		let mut sbox = Sandbox::from(&WasmModule::<T>::from(ModuleDefinition {
+			call_body: Some(call_body),
+			.. Default::default()
+		}));
+	}: {
+		sbox.invoke();
+	}
+
 	// w_i{32,64}add = w_bench - 3 * w_param
 	instr_i64add {
 		let r in 0 .. INSTR_BENCHMARK_BATCHES;
@@ -1875,4 +1930,7 @@ mod tests {
 	create_test!(seal_hash_blake2_256_per_kb);
 	create_test!(seal_hash_blake2_128);
 	create_test!(seal_hash_blake2_128_per_kb);
+	create_test!(instr_local_get);
+	create_test!(instr_local_set);
+	create_test!(instr_local_tee);
 }

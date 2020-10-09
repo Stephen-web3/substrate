@@ -281,6 +281,15 @@ pub mod body {
 		/// Insert a I64Const with a random value in [low, high).
 		/// (low, high)
 		RandomI64(i64, i64),
+		/// Insert a GetLocal with a random offset in [low, high).
+		/// (low, high)
+		GetLocal(u32, u32),
+		/// Insert a SetLocal with a random offset in [low, high).
+		/// (low, high)
+		SetLocal(u32, u32),
+		/// Insert a TeeLocal with a random offset in [low, high).
+		/// (low, high)
+		TeeLocal(u32, u32),
 	}
 
 	pub fn plain(instructions: Vec<Instruction>) -> FuncBody {
@@ -328,11 +337,26 @@ pub mod body {
 					DynInstr::RandomI64(low, high) => {
 						Instruction::I64Const(rng.gen_range(*low, *high))
 					},
+					DynInstr::GetLocal(low, high) => {
+						Instruction::GetLocal(rng.gen_range(*low, *high))
+					},
+					DynInstr::SetLocal(low, high) => {
+						Instruction::SetLocal(rng.gen_range(*low, *high))
+					},
+					DynInstr::TeeLocal(low, high) => {
+						Instruction::TeeLocal(rng.gen_range(*low, *high))
+					},
 				}
 			})
 			.chain(sp_std::iter::once(Instruction::End))
 			.collect();
 		FuncBody::new(Vec::new(), Instructions::new(body))
+	}
+
+	/// Replace the locals of the supplied `body` with `num` i64 locals.
+	pub fn inject_locals(body: &mut FuncBody, num: u32) {
+		use parity_wasm::elements::Local;
+		*body.locals_mut() = (0..num).map(|i| Local::new(i, ValueType::I64)).collect()
 	}
 }
 
